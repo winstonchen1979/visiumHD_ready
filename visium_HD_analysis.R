@@ -969,9 +969,49 @@ server <- function(input, output, session) {
     }
     genes <- trimws(unlist(strsplit(gene_text, "[,;\\s]+")))
     genes <- genes[genes != ""]
-    valid_genes <- intersect(genes, rownames(sobj))
+
+    # --- Resolve gene symbols to feature names in the assay -----------------
+    assay_feats <- rownames(sobj)
+    # Direct match first (if rownames are already gene symbols)
+    valid_genes <- intersect(genes, assay_feats)
+
+    # If no match, try converting SYMBOL → Ensembl ID via org.*.eg.db
+    if (length(valid_genes) < length(genes)) {
+      unmatched <- setdiff(genes, valid_genes)
+      org_key <- if (rv$organism == "mouse") "Mm" else "Hs"
+      map_fn <- paste0("sym2eg", org_key)
+
+      if (requireNamespace("AnnotationDbi", quietly = TRUE) &&
+          requireNamespace(org_key, quietly = TRUE)) {
+        tryCatch({
+          db_pkg <- get(paste0("org.", org_key, ".eg.db"), envir = asNamespace(org_key))
+          map_res <- AnnotationDbi::select(db_pkg,
+                                           keys = unmatched,
+                                           columns = "ENSEMBL",
+                                           keytype = "SYMBOL")
+          # Keep unique, non-NA Ensembl IDs that exist in the assay
+          ensembl_matches <- map_res$ENSEMBL[!is.na(map_res$ENSEMBL) & map_res$ENSEMBL %in% assay_feats]
+          ensembl_matches <- unique(ensembl_matches)
+          new_hits <- setdiff(ensembl_matches, valid_genes)
+          if (length(new_hits) > 0) {
+            valid_genes <- c(valid_genes, new_hits)
+          }
+        }, error = function(e) NULL)
+      }
+    }
+
+    # If still no match, try reverse: assume input is Ensembl ID
     if (length(valid_genes) == 0) {
-      showNotification(paste0("找不到任何匹配基因。輸入: ", paste(genes, collapse = ", ")), type = "error")
+      valid_genes <- intersect(genes, assay_feats)
+    }
+
+    if (length(valid_genes) == 0) {
+      sample_feats <- head(assay_feats, 5)
+      showNotification(
+        paste0("找不到匹配基因。輸入: ", paste(genes, collapse = ", "),
+               "\nAssay 特徵範例: ", paste(sample_feats, collapse = ", "),
+               "\n請確認使用正確的基因命名 (SYMBOL 或 Ensembl ID)"),
+        type = "error", duration = 15)
       return()
     }
     tryCatch({
