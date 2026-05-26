@@ -92,6 +92,7 @@ auto_detect_dir <- function(data_dir) {
 ui <- dashboardPage(
   skin = "blue",
   dashboardHeader(title = "Visium HD 分析系統", titleWidth = 300),
+  useShinyjs(),
 
   # --- Sidebar ---------------------------------------------------------------
   dashboardSidebar(
@@ -336,6 +337,7 @@ ui <- dashboardPage(
         fluidRow(
           box(width = 4, title = "軌跡參數", status = "info", solidHeader = TRUE,
               selectInput("traj_cluster_col", "Cluster 欄位:", choices = NULL),
+              actionButton("btn_refresh_traj", "更新欄位", icon = icon("sync")),
               selectInput("traj_start", "起始 Cluster (optional):", choices = c("Auto" = "")),
               numericInput("traj_dims", "使用 PCA dims:", value = 10, min = 2, max = 50),
               checkboxInput("traj_roi_subset", "僅分析特定 ROI 的特定細胞群", value = FALSE),
@@ -356,6 +358,7 @@ ui <- dashboardPage(
         fluidRow(
           box(width = 4, title = "CellChat 參數", status = "warning", solidHeader = TRUE,
               selectInput("cc_celltype_col", "Cell Type 欄位:", choices = NULL),
+              actionButton("btn_refresh_cc", "更新欄位", icon = icon("sync")),
               selectInput("cc_db", "Interaction Database:",
                           choices = c("Secreted Signaling" = "Secreted Signaling",
                                       "ECM-Receptor" = "ECM-Receptor",
@@ -380,7 +383,35 @@ ui <- dashboardPage(
 
       # == Tab 9: Report Export ==
       tabItem(tabName = "tab_report",
-        h2("分析報告與版本資訊"),
+        h2("分析報告與匯出"),
+        fluidRow(
+          box(width = 6, title = tagList(icon("save"), " 匯出資料"),
+              status = "info", solidHeader = TRUE,
+              helpText("匯出當前 Seurat 物件為 RDS 檔案，可後續載入繼續分析。"),
+              downloadButton("btn_export_rds", "匯出 Seurat RDS",
+                             class = "btn-primary btn-block"),
+              hr(),
+              downloadButton("btn_export_meta", "匯出 Metadata (CSV)",
+                             class = "btn-default btn-block"),
+              hr(),
+              downloadButton("btn_export_celltypes", "匯出細胞型態列表",
+                             class = "btn-default btn-block"),
+          ),
+          box(width = 6, title = tagList(icon("tags"), " 細胞型態管理"),
+              status = "warning", solidHeader = TRUE,
+              helpText("查看、重新命名已定義的細胞型態。"),
+              actionButton("btn_refresh_celltypes", "🔄 重新整理",
+                           class = "btn-default",
+                           style = "margin-bottom:10px;"),
+              DT::dataTableOutput("celltype_table"),
+              hr(),
+              h4("重新命名細胞型態"),
+              selectInput("ct_rename_from", "目前名稱:", choices = NULL),
+              textInput("ct_rename_to", "新名稱:", placeholder = "輸入新名稱"),
+              actionButton("btn_rename_ct", "套用重新命名",
+                           class = "btn-warning btn-block")
+          ),
+        ),
         fluidRow(
           box(width = 12, title = tagList(icon("file-alt"), " Methods Section (投稿用)"),
               status = "primary", solidHeader = TRUE,
@@ -719,6 +750,7 @@ server <- function(input, output, session) {
 
         incProgress(0.1, detail = "Done!")
         rv$datasets[[rv$active_dataset]]$seurat <- sobj
+        gc()
         showNotification("前處理完成!", type = "message")
       }, error = function(e) {
         showNotification(paste("前處理錯誤:", e$message), type = "error", duration = 10)
@@ -1099,6 +1131,7 @@ server <- function(input, output, session) {
           sobj$cell_type <- as.character(sobj$first_type)
         }
         rv$datasets[[rv$active_dataset]]$seurat <- sobj
+        gc()
         showNotification("RCTD 完成!", type = "message")
       }, error = function(e) {
         showNotification(paste("RCTD 錯誤:", e$message), type = "error", duration = 10)
@@ -1150,6 +1183,7 @@ server <- function(input, output, session) {
         markers$gene <- rownames(markers)
         rv$de_results <- markers
         rv$datasets[[rv$active_dataset]]$seurat <- sobj
+        gc()
         showNotification(paste0("找到 ", nrow(markers), " 個差異基因"), type = "message")
       }, error = function(e) {
         showNotification(paste("DE 錯誤:", e$message), type = "error", duration = 10)
@@ -1277,7 +1311,7 @@ server <- function(input, output, session) {
   }, options = list(pageLength = 10, scrollX = TRUE), rownames = FALSE)
 
   # --- Trajectory Analysis --------------------------------------------------
-  observeEvent(input$btn_refresh_annot, {
+  observeEvent(input$btn_refresh_traj, {
     # Also update trajectory selectors
     sobj <- active_obj(); req(sobj)
     cols <- colnames(sobj@meta.data)
@@ -1459,7 +1493,7 @@ server <- function(input, output, session) {
   }, options = list(pageLength = 15, scrollX = TRUE), rownames = FALSE)
 
   # Update CellChat selectors
-  observeEvent(input$btn_refresh_annot, {
+  observeEvent(input$btn_refresh_cc, {
     sobj <- active_obj(); req(sobj)
     cols <- colnames(sobj@meta.data)
     updateSelectInput(session, "cc_celltype_col", choices = cols,
@@ -1615,6 +1649,96 @@ server <- function(input, output, session) {
       writeLines(methods_reactive(), file)
     }
   )
+
+  # --- Export Seurat RDS ----------------------------------------------------
+  output$btn_export_rds <- downloadHandler(
+    filename = function() {
+      ds <- if (!is.null(rv$active_dataset)) rv$active_dataset else "seurat"
+      paste0(ds, "_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".rds")
+    },
+    content = function(file) {
+      sobj <- active_obj(); req(sobj)
+      saveRDS(sobj, file)
+      showNotification("Seurat 物件已匯出!", type = "message")
+    }
+  )
+
+  # --- Export Metadata CSV --------------------------------------------------
+  output$btn_export_meta <- downloadHandler(
+    filename = function() {
+      ds <- if (!is.null(rv$active_dataset)) rv$active_dataset else "metadata"
+      paste0(ds, "_metadata_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      sobj <- active_obj(); req(sobj)
+      write.csv(sobj@meta.data, file, row.names = TRUE)
+      showNotification("Metadata 已匯出!", type = "message")
+    }
+  )
+
+  # --- Export Cell Types CSV ------------------------------------------------
+  output$btn_export_celltypes <- downloadHandler(
+    filename = function() {
+      ds <- if (!is.null(rv$active_dataset)) rv$active_dataset else "celltypes"
+      paste0(ds, "_celltypes_", format(Sys.time(), "%Y%m%d_%H%M%S"), ".csv")
+    },
+    content = function(file) {
+      sobj <- active_obj(); req(sobj)
+      if (!"cell_type" %in% colnames(sobj@meta.data)) {
+        showNotification("尚未定義細胞型態", type = "warning"); return()
+      }
+      ct_table <- data.frame(
+        cell = colnames(sobj),
+        cell_type = sobj$cell_type,
+        seurat_clusters = sobj$seurat_clusters
+      )
+      write.csv(ct_table, file, row.names = FALSE)
+      showNotification("細胞型態列表已匯出!", type = "message")
+    }
+  )
+
+  # --- Cell Type Management Table -------------------------------------------
+  output$celltype_table <- DT::renderDataTable({
+    input$btn_refresh_celltypes
+    sobj <- active_obj(); req(sobj)
+    if (!"cell_type" %in% colnames(sobj@meta.data)) {
+      return(data.frame(CellType = "尚未定義", Cells = NA, stringsAsFactors = FALSE))
+    }
+    ct_counts <- table(sobj$cell_type)
+    data.frame(
+      CellType = names(ct_counts),
+      Cells = as.integer(ct_counts),
+      Percent = round(as.integer(ct_counts) / sum(ct_counts) * 100, 1),
+      stringsAsFactors = FALSE
+    ) %>% arrange(desc(Cells))
+  }, options = list(dom = "t", pageLength = 20, ordering = TRUE), rownames = FALSE)
+
+  # --- Update rename dropdown -----------------------------------------------
+  observeEvent(input$btn_refresh_celltypes, {
+    sobj <- active_obj(); req(sobj)
+    if ("cell_type" %in% colnames(sobj@meta.data)) {
+      cts <- sort(unique(sobj$cell_type))
+      updateSelectInput(session, "ct_rename_from", choices = cts)
+    }
+  })
+
+  # --- Rename Cell Type -----------------------------------------------------
+  observeEvent(input$btn_rename_ct, {
+    sobj <- active_obj(); req(sobj, input$ct_rename_from, input$ct_rename_to)
+    new_name <- trimws(input$ct_rename_to)
+    if (new_name == "") {
+      showNotification("請輸入新名稱", type = "warning"); return()
+    }
+    if (!"cell_type" %in% colnames(sobj@meta.data)) {
+      showNotification("尚未定義細胞型態", type = "warning"); return()
+    }
+    old_name <- input$ct_rename_from
+    n_changed <- sum(sobj$cell_type == old_name)
+    sobj$cell_type[sobj$cell_type == old_name] <- new_name
+    rv$datasets[[rv$active_dataset]]$seurat <- sobj
+    showNotification(paste0("已重新命名: '", old_name, "' → '", new_name,
+                            "' (", n_changed, " cells)"), type = "message")
+  })
 
 } # end server
 
