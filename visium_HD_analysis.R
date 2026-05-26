@@ -268,8 +268,9 @@ ui <- dashboardPage(
               actionButton("btn_manual_annot", "套用標註", icon = icon("tag"), class = "btn-success"),
               hr(),
               h4("以 Markers 定義細胞群"),
-              textAreaInput("marker_genes", "輸入 Marker Genes (逗號分隔):",
-                            placeholder = "e.g., TPSAB1, CPA3, KIT", rows = 3),
+              selectizeInput("marker_genes", "選擇 Marker Genes (多選，可搜尋):",
+                             choices = NULL, multiple = TRUE,
+                             options = list(maxItems = 20, placeholder = "搜尋並選擇基因...")),
               textInput("marker_cell_name", "細胞群名稱:", placeholder = "e.g., Mast cell"),
               sliderInput("marker_threshold", "Module Score 閾值:", min = -1, max = 2, value = 0, step = 0.1),
               actionButton("btn_marker_annot", "依 Markers 定義細胞", icon = icon("bullseye"), class = "btn-info btn-block")
@@ -959,27 +960,59 @@ server <- function(input, output, session) {
                             " (", length(cells), " cells)"), type = "message")
   })
 
+  # --- Populate Marker Gene Dropdown ----------------------------------------
+  observe({
+    sobj <- active_obj(); req(sobj)
+    feats <- rownames(sobj)
+    # Try to convert Ensembl IDs → gene symbols for user-friendly display
+    gene_symbols <- feats
+    org_key <- if (rv$organism == "mouse") "Mm" else "Hs"
+
+    if (requireNamespace("AnnotationDbi", quietly = TRUE) &&
+        requireNamespace(org_key, quietly = TRUE)) {
+      tryCatch({
+        db_pkg <- get(paste0("org.", org_key, ".eg.db"), envir = asNamespace(org_key))
+        map_res <- AnnotationDbi::select(db_pkg,
+                                         keys = feats,
+                                         columns = "SYMBOL",
+                                         keytype = "ENSEMBL")
+        # Build a lookup: Ensembl → SYMBOL (take first if multiple)
+        sym_lookup <- tapply(map_res$SYMBOL, map_res$ENSEMBL, function(x) x[!is.na(x)][1])
+        converted <- sym_lookup[feats]
+        # Use symbols where available, keep original ID otherwise
+        gene_symbols <- ifelse(!is.na(converted) & converted != "", converted, feats)
+        # Remove duplicates (multiple Ensembl IDs can map to same symbol)
+        gene_symbols <- unique(gene_symbols)
+      }, error = function(e) NULL)
+    }
+
+    updateSelectizeInput(session, "marker_genes",
+                         choices = sort(gene_symbols),
+                         server = TRUE)
+  })
+
   # --- Marker-Based Cell Type Annotation ------------------------------------
   observeEvent(input$btn_marker_annot, {
     sobj <- active_obj(); req(sobj)
-    gene_text <- trimws(input$marker_genes)
-    cell_name <- trimws(input$marker_cell_name)
-    if (gene_text == "" || cell_name == "") {
-      showNotification("請輸入 marker genes 和細胞群名稱", type = "warning"); return()
+    # selectizeInput returns a character vector (or NULL if nothing selected)
+    genes <- input$marker_genes
+    if (is.null(genes) || length(genes) == 0) {
+      showNotification("請選擇 marker genes", type = "warning"); return()
     }
-    genes <- trimws(unlist(strsplit(gene_text, "[,;\\s]+")))
-    genes <- genes[genes != ""]
+    cell_name <- trimws(input$marker_cell_name)
+    if (cell_name == "") {
+      showNotification("請輸入細胞群名稱", type = "warning"); return()
+    }
 
-    # --- Resolve gene symbols to feature names in the assay -----------------
+    # --- Resolve selected gene symbols to feature names in the assay ---------
     assay_feats <- rownames(sobj)
     # Direct match first (if rownames are already gene symbols)
     valid_genes <- intersect(genes, assay_feats)
 
-    # If no match, try converting SYMBOL → Ensembl ID via org.*.eg.db
+    # If partial or no match, try converting SYMBOL → Ensembl ID via org.*.eg.db
     if (length(valid_genes) < length(genes)) {
       unmatched <- setdiff(genes, valid_genes)
       org_key <- if (rv$organism == "mouse") "Mm" else "Hs"
-      map_fn <- paste0("sym2eg", org_key)
 
       if (requireNamespace("AnnotationDbi", quietly = TRUE) &&
           requireNamespace(org_key, quietly = TRUE)) {
@@ -998,11 +1031,6 @@ server <- function(input, output, session) {
           }
         }, error = function(e) NULL)
       }
-    }
-
-    # If still no match, try reverse: assume input is Ensembl ID
-    if (length(valid_genes) == 0) {
-      valid_genes <- intersect(genes, assay_feats)
     }
 
     if (length(valid_genes) == 0) {
